@@ -1,0 +1,346 @@
+--- ./util/memfd.c	2016-03-30 05:01:23.000000000 +0800
++++ /root/qira/qira-1.3/tracers/qemu/qemu-2.5.1/util/memfd.c	2020-03-12 03:39:39.294056670 +0800
+@@ -32,15 +32,17 @@
+ 
+ #include <sys/mman.h>
+ 
++
+ #include "qemu/memfd.h"
+ 
+ #ifdef CONFIG_MEMFD
+ #include <sys/memfd.h>
+ #elif defined CONFIG_LINUX
++//#if defined CONFIG_LINUX && !defined CONFIG_MEMFD
+ #include <sys/syscall.h>
+ #include <asm/unistd.h>
+ 
+-static int memfd_create(const char *name, unsigned int flags)
++/*static int memfd_create(const char *name, unsigned int flags)
+ {
+ #ifdef __NR_memfd_create
+     return syscall(__NR_memfd_create, name, flags);
+@@ -48,6 +50,7 @@
+     return -1;
+ #endif
+ }
++*/
+ #endif
+ 
+ #ifndef MFD_CLOEXEC
+--- ./configure	2016-03-30 05:01:14.000000000 +0800
++++ /root/qira/qira-1.3/tracers/qemu/qemu-2.5.1/configure	2020-03-12 03:59:11.361993131 +0800
+@@ -329,6 +329,7 @@
+ glusterfs=""
+ glusterfs_discard="no"
+ glusterfs_zerofill="no"
++glusterfs_ftruncate_has_stat="no"
+ archipelago="no"
+ gtk=""
+ gtkabi=""
+@@ -3410,6 +3411,17 @@
+     if $pkg_config --atleast-version=6 glusterfs-api; then
+       glusterfs_zerofill="yes"
+     fi
++    cat > $TMPC << EOF
++#include <glusterfs/api/glfs.h>
++int main(void)
++{
++	/* new glfs_ftruncate() passes two additional args */
++	return glfs_ftruncate(NULL, 0, NULL, NULL);	
++}
++EOF
++    if compile_prog "$glusterfs_cflags" "$glusterfs_libs" ; then
++	glusterfs_ftruncate_has_stat="yes"
++    fi
+   else
+     if test "$glusterfs" = "yes" ; then
+       feature_not_found "GlusterFS backend support" \
+@@ -5324,7 +5336,9 @@
+ if test "$glusterfs_zerofill" = "yes" ; then
+   echo "CONFIG_GLUSTERFS_ZEROFILL=y" >> $config_host_mak
+ fi
+-
++if test "$glusterfs_ftruncate_has_stat" = "yes" ; then
++	echo "CONFIG_GLUSTERFS_FTRUNCATE_HAS_STAT=y" >> $config_host_mak
++fi
+ if test "$archipelago" = "yes" ; then
+   echo "CONFIG_ARCHIPELAGO=m" >> $config_host_mak
+   echo "ARCHIPELAGO_LIBS=$archipelago_libs" >> $config_host_mak
+--- ./block/gluster.c	2016-03-30 05:01:14.000000000 +0800
++++ /root/qira/qira-1.3/tracers/qemu/qemu-2.5.1/block/gluster.c	2020-03-12 03:51:54.830016796 +0800
+@@ -10,7 +10,9 @@
+ #include <glusterfs/api/glfs.h>
+ #include "block/block_int.h"
+ #include "qemu/uri.h"
+-
++#ifdef CONFIG_GLUSTERFS_FTRUNCATE_HAS_STAT
++# define glfs_ftruncate(fd, offset) glfs_ftruncate(fd, offset, NULL, NULL)
++#endif
+ typedef struct GlusterAIOCB {
+     int64_t size;
+     int ret;
+--- ./qga/commands-posix.c	2016-03-30 05:01:18.000000000 +0800
++++ /root/qira/qira-1.3/tracers/qemu/qemu-2.5.1/qga/commands-posix.c	2020-03-12 04:06:49.281968307 +0800
+@@ -13,6 +13,7 @@
+ 
+ #include <glib.h>
+ #include <sys/types.h>
++#include <sys/sysmacros.h>
+ #include <sys/ioctl.h>
+ #include <sys/wait.h>
+ #include <unistd.h>
+--- ./user-exec.c	2016-03-30 05:01:23.000000000 +0800
++++ /root/qira/qira-1.3/tracers/qemu/qemu-2.5.1/user-exec.c	2020-03-12 04:21:01.909922086 +0800
+@@ -58,7 +58,7 @@
+ void cpu_resume_from_signal(CPUState *cpu, void *puc)
+ {
+ #ifdef __linux__
+-    struct ucontext *uc = puc;
++    struct ucontext_t *uc = puc;
+ #elif defined(__OpenBSD__)
+     struct sigcontext *uc = puc;
+ #endif
+@@ -131,21 +131,21 @@
+ #if defined(__i386__)
+ 
+ #if defined(__APPLE__)
+-#include <sys/ucontext.h>
++#include <sys/ucontext_t.h>
+ 
+ #define EIP_sig(context)  (*((unsigned long *)&(context)->uc_mcontext->ss.eip))
+ #define TRAP_sig(context)    ((context)->uc_mcontext->es.trapno)
+ #define ERROR_sig(context)   ((context)->uc_mcontext->es.err)
+ #define MASK_sig(context)    ((context)->uc_sigmask)
+ #elif defined(__NetBSD__)
+-#include <ucontext.h>
++#include <ucontext_t.h>
+ 
+ #define EIP_sig(context)     ((context)->uc_mcontext.__gregs[_REG_EIP])
+ #define TRAP_sig(context)    ((context)->uc_mcontext.__gregs[_REG_TRAPNO])
+ #define ERROR_sig(context)   ((context)->uc_mcontext.__gregs[_REG_ERR])
+ #define MASK_sig(context)    ((context)->uc_sigmask)
+ #elif defined(__FreeBSD__) || defined(__DragonFly__)
+-#include <ucontext.h>
++#include <ucontext_t.h>
+ 
+ #define EIP_sig(context)  (*((unsigned long *)&(context)->uc_mcontext.mc_eip))
+ #define TRAP_sig(context)    ((context)->uc_mcontext.mc_trapno)
+@@ -168,11 +168,11 @@
+ {
+     siginfo_t *info = pinfo;
+ #if defined(__NetBSD__) || defined(__FreeBSD__) || defined(__DragonFly__)
+-    ucontext_t *uc = puc;
++    ucontext_t_t *uc = puc;
+ #elif defined(__OpenBSD__)
+     struct sigcontext *uc = puc;
+ #else
+-    struct ucontext *uc = puc;
++    struct ucontext_t *uc = puc;
+ #endif
+     unsigned long pc;
+     int trapno;
+@@ -204,7 +204,7 @@
+ #define ERROR_sig(context)    ((context)->sc_err)
+ #define MASK_sig(context)     ((context)->sc_mask)
+ #elif defined(__FreeBSD__) || defined(__DragonFly__)
+-#include <ucontext.h>
++#include <ucontext_t.h>
+ 
+ #define PC_sig(context)  (*((unsigned long *)&(context)->uc_mcontext.mc_rip))
+ #define TRAP_sig(context)     ((context)->uc_mcontext.mc_trapno)
+@@ -223,11 +223,11 @@
+     siginfo_t *info = pinfo;
+     unsigned long pc;
+ #if defined(__NetBSD__) || defined(__FreeBSD__) || defined(__DragonFly__)
+-    ucontext_t *uc = puc;
++    ucontext_t_t *uc = puc;
+ #elif defined(__OpenBSD__)
+     struct sigcontext *uc = puc;
+ #else
+-    struct ucontext *uc = puc;
++    struct ucontext_t *uc = puc;
+ #endif
+ 
+     pc = PC_sig(uc);
+@@ -274,7 +274,7 @@
+ #endif /* linux */
+ 
+ #if defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
+-#include <ucontext.h>
++#include <ucontext_t.h>
+ #define IAR_sig(context)               ((context)->uc_mcontext.mc_srr0)
+ #define MSR_sig(context)               ((context)->uc_mcontext.mc_srr1)
+ #define CTR_sig(context)               ((context)->uc_mcontext.mc_ctr)
+@@ -288,8 +288,8 @@
+ #endif /* __FreeBSD__|| __FreeBSD_kernel__ */
+ 
+ #ifdef __APPLE__
+-#include <sys/ucontext.h>
+-typedef struct ucontext SIGCONTEXT;
++#include <sys/ucontext_t.h>
++typedef struct ucontext_t SIGCONTEXT;
+ /* All Registers access - only for local access */
+ #define REG_sig(reg_name, context)              \
+     ((context)->uc_mcontext->ss.reg_name)
+@@ -330,9 +330,9 @@
+ {
+     siginfo_t *info = pinfo;
+ #if defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
+-    ucontext_t *uc = puc;
++    ucontext_t_t *uc = puc;
+ #else
+-    struct ucontext *uc = puc;
++    struct ucontext_t *uc = puc;
+ #endif
+     unsigned long pc;
+     int is_write;
+@@ -359,7 +359,7 @@
+                            void *puc)
+ {
+     siginfo_t *info = pinfo;
+-    struct ucontext *uc = puc;
++    struct ucontext_t *uc = puc;
+     uint32_t *pc = uc->uc_mcontext.sc_pc;
+     uint32_t insn = *pc;
+     int is_write = 0;
+@@ -406,7 +406,7 @@
+     unsigned long pc = uc->sc_pc;
+     void *sigmask = (void *)(long)uc->sc_mask;
+ #elif defined(__NetBSD__)
+-    ucontext_t *uc = puc;
++    ucontext_t_t *uc = puc;
+     unsigned long pc = _UC_MACHINE_PC(uc);
+     void *sigmask = (void *)&uc->uc_sigmask;
+ #endif
+@@ -447,7 +447,7 @@
+ #elif defined(__arm__)
+ 
+ #if defined(__NetBSD__)
+-#include <ucontext.h>
++#include <ucontext_t.h>
+ #endif
+ 
+ int cpu_signal_handler(int host_signum, void *pinfo,
+@@ -455,9 +455,9 @@
+ {
+     siginfo_t *info = pinfo;
+ #if defined(__NetBSD__)
+-    ucontext_t *uc = puc;
++    ucontext_t_t *uc = puc;
+ #else
+-    struct ucontext *uc = puc;
++    struct ucontext_t *uc = puc;
+ #endif
+     unsigned long pc;
+     int is_write;
+@@ -484,7 +484,7 @@
+ int cpu_signal_handler(int host_signum, void *pinfo, void *puc)
+ {
+     siginfo_t *info = pinfo;
+-    struct ucontext *uc = puc;
++    struct ucontext_t *uc = puc;
+     uintptr_t pc = uc->uc_mcontext.pc;
+     uint32_t insn = *(uint32_t *)pc;
+     bool is_write;
+@@ -513,7 +513,7 @@
+                        void *puc)
+ {
+     siginfo_t *info = pinfo;
+-    struct ucontext *uc = puc;
++    struct ucontext_t *uc = puc;
+     unsigned long pc;
+     int is_write;
+ 
+@@ -535,7 +535,7 @@
+ int cpu_signal_handler(int host_signum, void *pinfo, void *puc)
+ {
+     siginfo_t *info = pinfo;
+-    struct ucontext *uc = puc;
++    struct ucontext_t *uc = puc;
+     unsigned long ip;
+     int is_write = 0;
+ 
+@@ -566,7 +566,7 @@
+                        void *puc)
+ {
+     siginfo_t *info = pinfo;
+-    struct ucontext *uc = puc;
++    struct ucontext_t *uc = puc;
+     unsigned long pc;
+     uint16_t *pinsn;
+     int is_write = 0;
+@@ -619,7 +619,7 @@
+                        void *puc)
+ {
+     siginfo_t *info = pinfo;
+-    struct ucontext *uc = puc;
++    struct ucontext_t *uc = puc;
+     greg_t pc = uc->uc_mcontext.pc;
+     int is_write;
+ 
+@@ -635,7 +635,7 @@
+                        void *puc)
+ {
+     siginfo_t *info = pinfo;
+-    struct ucontext *uc = puc;
++    struct ucontext_t *uc = puc;
+     unsigned long pc = uc->uc_mcontext.sc_iaoq[0];
+     uint32_t insn = *(uint32_t *)pc;
+     int is_write = 0;
+--- ./linux-user/strace.c	2020-03-12 23:24:21.562824483 +0800
++++ /root/qira/qira-1.3/tracers/qemu/qemu-2.5.1/linux-user/strace.c	2020-03-12 04:24:07.389912031 +0800
+@@ -5,12 +5,23 @@
+ #include <sys/shm.h>
+ #include <sys/select.h>
+ #include <sys/types.h>
++#include <sys/sysmacros.h>
+ #include <sys/mount.h>
+ #include <sys/mman.h>
+ #include <unistd.h>
+ #include <sched.h>
+ #include "qemu.h"
+ 
++#undef TARGET_ABI_FMT_lx
++#ifdef TARGET_ABI32
++#define TARGET_ABI_FMT_lx "%x"
++#else
++#define TARGET_ABI_FMT_lx "%llx"
++#endif
++
++extern FILE *GLOBAL_strace_file;
++#define gemu_log(x...) { fprintf(GLOBAL_strace_file, x); fflush(GLOBAL_strace_file); }
++
+ int do_strace=0;
+ 
+ struct syscallname {
+@@ -637,10 +648,11 @@
+ static void
+ print_pointer(abi_long p, int last)
+ {
+-    if (p == 0)
++    if (p == 0) {
+         gemu_log("NULL%s", get_comma(last));
+-    else
++    } else {
+         gemu_log("0x" TARGET_ABI_FMT_lx "%s", p, get_comma(last));
++    }
+ }
+ 
+ /*
+@@ -1562,6 +1574,8 @@
+ 
+ static int nsyscalls = ARRAY_SIZE(scnames);
+ 
++uint32_t get_current_clnum(void);
++
+ /*
+  * The public interface to this module.
+  */
+@@ -1573,6 +1587,7 @@
+     int i;
+     const char *format="%s(" TARGET_ABI_FMT_ld "," TARGET_ABI_FMT_ld "," TARGET_ABI_FMT_ld "," TARGET_ABI_FMT_ld "," TARGET_ABI_FMT_ld "," TARGET_ABI_FMT_ld ")";
+ 
++    gemu_log("%d ", get_current_clnum() );
+     gemu_log("%d ", getpid() );
+ 
+     for(i=0;i<nsyscalls;i++)
