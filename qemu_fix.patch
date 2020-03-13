@@ -287,9 +287,9 @@
      unsigned long pc = uc->uc_mcontext.sc_iaoq[0];
      uint32_t insn = *(uint32_t *)pc;
      int is_write = 0;
---- ./linux-user/strace.c	2020-03-12 23:24:21.562824483 +0800
-+++ /root/qira/qira-1.3/tracers/qemu/qemu-2.5.1/linux-user/strace.c	2020-03-12 04:24:07.389912031 +0800
-@@ -5,12 +5,23 @@
+--- ./linux-user/strace.c	2020-03-13 16:20:12.945005322 +0800
++++ /root/qira/qira-1.3/tracers/qemu/qemu-latest/linux-user/strace.c	2020-03-12 04:24:07.389912031 +0800
+@@ -5,6 +5,7 @@
  #include <sys/shm.h>
  #include <sys/select.h>
  #include <sys/types.h>
@@ -297,50 +297,3 @@
  #include <sys/mount.h>
  #include <sys/mman.h>
  #include <unistd.h>
- #include <sched.h>
- #include "qemu.h"
- 
-+#undef TARGET_ABI_FMT_lx
-+#ifdef TARGET_ABI32
-+#define TARGET_ABI_FMT_lx "%x"
-+#else
-+#define TARGET_ABI_FMT_lx "%llx"
-+#endif
-+
-+extern FILE *GLOBAL_strace_file;
-+#define gemu_log(x...) { fprintf(GLOBAL_strace_file, x); fflush(GLOBAL_strace_file); }
-+
- int do_strace=0;
- 
- struct syscallname {
-@@ -637,10 +648,11 @@
- static void
- print_pointer(abi_long p, int last)
- {
--    if (p == 0)
-+    if (p == 0) {
-         gemu_log("NULL%s", get_comma(last));
--    else
-+    } else {
-         gemu_log("0x" TARGET_ABI_FMT_lx "%s", p, get_comma(last));
-+    }
- }
- 
- /*
-@@ -1562,6 +1574,8 @@
- 
- static int nsyscalls = ARRAY_SIZE(scnames);
- 
-+uint32_t get_current_clnum(void);
-+
- /*
-  * The public interface to this module.
-  */
-@@ -1573,6 +1587,7 @@
-     int i;
-     const char *format="%s(" TARGET_ABI_FMT_ld "," TARGET_ABI_FMT_ld "," TARGET_ABI_FMT_ld "," TARGET_ABI_FMT_ld "," TARGET_ABI_FMT_ld "," TARGET_ABI_FMT_ld ")";
- 
-+    gemu_log("%d ", get_current_clnum() );
-     gemu_log("%d ", getpid() );
- 
-     for(i=0;i<nsyscalls;i++)
